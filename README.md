@@ -2,7 +2,7 @@
 
 <img src="icon.png" width="96" align="right" alt="">
 
-A Dalamud plugin for FINAL FANTASY XIV that makes Dancing Mad Exdeath and Chaos smaller, with optional Penumbra redraw support.
+A Dalamud plugin for FINAL FANTASY XIV that makes Dancing Mad Exdeath and Chaos smaller
 
 ## Install
 

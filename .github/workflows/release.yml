@@ -1,0 +1,49 @@
+name: Release
+
+# Put the new build in ChibiDancingMad/ (with the version in ChibiDancingMad.json), then push a tag:
+#   vX.Y.Z.W-testing  -> testing version (prerelease)
+#   vX.Y.Z.W          -> stable version
+# The plugin list in Sayuuryi/SawooPlugins picks up new releases from here.
+
+on:
+  push:
+    tags: [ 'v*' ]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-2022
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Check version
+        id: version
+        shell: pwsh
+        run: |
+          $tag = '${{ github.ref_name }}'.TrimStart('v')
+          $testing = $tag.EndsWith('-testing')
+          $version = $tag -replace '-testing$', ''
+          $manifest = Get-Content ChibiDancingMad/ChibiDancingMad.json -Raw | ConvertFrom-Json
+          if ($manifest.AssemblyVersion -ne $version) { throw "Tag $tag does not match AssemblyVersion $($manifest.AssemblyVersion)" }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "testing=$($testing.ToString().ToLower())" >> $env:GITHUB_OUTPUT
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Compress-Archive -Path ChibiDancingMad/* -DestinationPath dist/latest.zip -Force
+          Copy-Item ChibiDancingMad/ChibiDancingMad.json dist/
+
+      - name: Create release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $title = "Chibi Dancing Mad ${{ steps.version.outputs.version }}"
+          $flags = @()
+          if ('${{ steps.version.outputs.testing }}' -eq 'true') { $title += " (testing)"; $flags += '--prerelease' }
+          gh release create '${{ github.ref_name }}' dist/latest.zip dist/ChibiDancingMad.json --title $title --notes "Chibi Dancing Mad ${{ steps.version.outputs.version }}" @flags

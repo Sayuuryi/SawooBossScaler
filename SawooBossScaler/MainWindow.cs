@@ -182,11 +182,55 @@ public sealed class MainWindow : Window
 
     private void DrawPhase(Ultimate fight, Phase phase, bool isCurrent)
     {
+        using var id = ImRaii.PushId($"{fight.Key}/{phase.Label}");
+
+        // one size for the whole phase
+        var sizes = phase.Bosses.Select(b => SizeTable.Get(_config.Sizes, fight, phase, b)).ToList();
+        var mixed = sizes.Distinct().Count() > 1;
+        var size = sizes[0];
+
+        ImGui.AlignTextToFramePadding();
         var title = isCurrent ? $"{phase.Title}  (now)" : phase.Title;
-        using (ImRaii.PushColor(ImGuiCol.Text, Good, isCurrent))
+        ImGui.TextColored(isCurrent ? Good : mixed || !SizeTable.IsNormal(size) ? Changed : Vector4.One, title);
+
+        ImGui.SameLine(260 * Scale);
+        ImGui.SetNextItemWidth(-80 * Scale);
+        if (SizeSlider("##PhaseSize", ref size, mixed ? "Mixed" : "%d%%"))
         {
-            if (!ImGui.CollapsingHeader($"{title}###{fight.Key}{phase.Label}", ImGuiTreeNodeFlags.DefaultOpen))
-                return;
+            foreach (var boss in phase.Bosses)
+                SizeTable.Set(_config.Sizes, fight, phase, boss, size);
+        }
+
+        if (ImGui.IsItemDeactivatedAfterEdit())
+            Save();
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip($"Size of every boss in {phase.Label}. Ctrl+click to type a size in %");
+
+        ImGui.SameLine();
+        using (ImRaii.Disabled(!mixed && SizeTable.IsNormal(size)))
+        {
+            if (ImGui.SmallButton("Reset"))
+            {
+                foreach (var boss in phase.Bosses)
+                    SizeTable.Set(_config.Sizes, fight, phase, boss, SizeTable.Normal);
+                Save();
+            }
+        }
+
+        // one boss at a time, for phases with more than one
+        if (phase.Bosses.Count < 2)
+        {
+            ImGui.Spacing();
+            return;
+        }
+
+        ImGui.Indent();
+        using var node = ImRaii.TreeNode($"Each boss ({phase.Bosses.Count})###Bosses");
+        ImGui.Unindent();
+        if (!node)
+        {
+            ImGui.Spacing();
+            return;
         }
 
         using var table = ImRaii.Table($"##{fight.Key}{phase.Label}", 3, ImGuiTableFlags.SizingFixedFit);
@@ -296,10 +340,10 @@ public sealed class MainWindow : Window
     private static string Percent(float size) => $"{MathF.Round(size * 100)}%";
 
     /// <summary>A size slider in whole percent, so typing a value (Ctrl+click) means percent too.</summary>
-    private static bool SizeSlider(string label, ref float size)
+    private static bool SizeSlider(string label, ref float size, string format = "%d%%")
     {
         var percent = (int)MathF.Round(size * 100);
-        if (!ImGui.SliderInt(label, ref percent, (int)(SizeTable.Min * 100), (int)(SizeTable.Max * 100), "%d%%"))
+        if (!ImGui.SliderInt(label, ref percent, (int)(SizeTable.Min * 100), (int)(SizeTable.Max * 100), format))
             return false;
 
         size = SizeTable.Clamp(percent / 100f);

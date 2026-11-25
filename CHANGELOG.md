@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.1.1.0]
+
+### Bosses
+- One size per phase: each phase has its own slider for all of its bosses
+- Sizes for single bosses are under "Each boss" in phases with more than one boss
+
 ## [0.1.0.0]
 
 ### Bosses

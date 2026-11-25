@@ -1,0 +1,8 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+  </Configurations>
+  <Project Path="SawooBossScaler/SawooBossScaler.csproj" />
+  <Project Path="SawooBossScaler.Core/SawooBossScaler.Core.csproj" />
+  <Project Path="SawooBossScaler.Tests/SawooBossScaler.Tests.csproj" />
+</Solution>

@@ -1,0 +1,105 @@
+name: Build
+
+# Releases:
+#   tag vX.Y.Z.W-testing  -> testing version (prerelease; for "Receive plugin testing versions")
+#   tag vX.Y.Z.W          -> stable version for everyone
+# Tag the same commit with the stable tag once the testing version is good.
+# The plugin list in Sayuuryi/SawooPlugins picks up new releases from here.
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  PLUGIN: SawooBossScaler
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Test
+        run: dotnet test SawooBossScaler.Tests --configuration Release
+
+      - name: Download Dalamud
+        run: |
+          Invoke-WebRequest -Uri https://goatcorp.github.io/dalamud-distrib/latest.zip -OutFile latest.zip
+          Expand-Archive -Force latest.zip "$env:AppData\XIVLauncher\addon\Hooks\dev"
+
+      - name: Build
+        run: dotnet build SawooBossScaler/SawooBossScaler.csproj --configuration Release
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: SawooBossScaler
+          path: SawooBossScaler/bin/Release/SawooBossScaler/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-2022
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Download artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: SawooBossScaler
+          path: dist
+
+      - name: Check version
+        id: version
+        shell: pwsh
+        run: |
+          $manifest = Get-Content dist/SawooBossScaler.json -Raw | ConvertFrom-Json
+          $tag = '${{ github.ref_name }}'.TrimStart('v')
+          $testing = $tag.EndsWith('-testing')
+          $version = $tag -replace '-testing$', ''
+          if ($manifest.AssemblyVersion -ne $version) {
+            throw "Tag $tag does not match AssemblyVersion $($manifest.AssemblyVersion) in the csproj"
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "testing=$($testing.ToString().ToLower())" >> $env:GITHUB_OUTPUT
+
+      - name: Release notes from CHANGELOG
+        shell: pwsh
+        run: |
+          $version = '${{ steps.version.outputs.version }}'
+          $lines = Get-Content CHANGELOG.md
+          $start = ($lines | Select-String -Pattern "^## \[$([regex]::Escape($version))\]" | Select-Object -First 1).LineNumber
+          if (-not $start) { throw "No CHANGELOG entry for $version" }
+          $body = @()
+          foreach ($line in $lines[$start..($lines.Count - 1)]) {
+            if ($line -match '^## ') { break }
+            $body += $line
+          }
+          ($body -join "`n").Trim() | Set-Content -Encoding utf8 notes.md
+
+      - name: Create release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $title = "Sawoo Boss Scaler ${{ steps.version.outputs.version }}"
+          $flags = @()
+          if ('${{ steps.version.outputs.testing }}' -eq 'true') { $title += " (testing)"; $flags += '--prerelease' }
+          gh release create '${{ github.ref_name }}' dist/latest.zip dist/SawooBossScaler.json --title $title --notes-file notes.md @flags

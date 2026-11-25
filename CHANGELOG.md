@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.1.2.0]
+
+### Settings
+- Resize my target: try a size on any enemy, a striking dummy works, to check which size method works for you
+
+### Fixes
+- Bosses are put back to normal size when they stop being resized while still on the field
+- The plugin still loads if enemy actions can't be read after a game patch; phases then follow casts and bosses showing up
+- Putting bosses back when unloading is done on the game's thread
+
 ## [0.1.1.0]
 
 ### Bosses

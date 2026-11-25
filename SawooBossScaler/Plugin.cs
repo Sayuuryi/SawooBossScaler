@@ -26,7 +26,8 @@ public sealed class Plugin : IDalamudPlugin
         IObjectTable objectTable,
         ICondition condition,
         IDataManager dataManager,
-        IGameInteropProvider gameInteropProvider)
+        IGameInteropProvider gameInteropProvider,
+        ITargetManager targetManager)
     {
         _pluginInterface = pluginInterface;
         _commandManager = commandManager;
@@ -37,8 +38,8 @@ public sealed class Plugin : IDalamudPlugin
             var config = pluginInterface.GetPluginConfig() as Config ?? new Config();
             var names = new BossNames(dataManager, log);
             var penumbra = new PenumbraRedraw(pluginInterface);
-            _actions = new ActionWatcher(gameInteropProvider, log);
-            _scaler = new BossScaler(framework, clientState, objectTable, condition, log, config, names, _actions, penumbra);
+            _actions = ActionWatcher.TryCreate(gameInteropProvider, log);
+            _scaler = new BossScaler(framework, clientState, objectTable, condition, targetManager, log, config, names, _actions, penumbra);
 
             _mainWindow = new MainWindow(pluginInterface, config, _scaler, penumbra);
             _windowSystem.AddWindow(_mainWindow);

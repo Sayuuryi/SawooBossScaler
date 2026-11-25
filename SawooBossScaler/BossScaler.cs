@@ -13,27 +13,29 @@ public readonly record struct BossOnField(string Name, float Size);
 
 /// <summary>
 /// Inside an ultimate: follows the phase and gives every boss on the field the size picked for that phase.
-/// Everything is put back when leaving, turning it off or unloading.
+/// Anything resized is put back as soon as it shouldn't be anymore: phase change, turning it off, switching method, unloading.
 /// </summary>
 public sealed unsafe class BossScaler : IDisposable
 {
-    /// <summary>Out of combat this long inside an ultimate counts as a wipe.</summary>
+    /// <summary>Out of combat this long, alive, inside an ultimate counts as a wipe.</summary>
     private static readonly TimeSpan WipeDelay = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan FirstRedraw = TimeSpan.FromMilliseconds(200);
     private static readonly TimeSpan SecondRedraw = TimeSpan.FromMilliseconds(850);
+    private const string TargetLabel = "Your target";
 
     private readonly IFramework _framework;
     private readonly IClientState _clientState;
     private readonly IObjectTable _objectTable;
     private readonly ICondition _condition;
+    private readonly ITargetManager _targetManager;
     private readonly IPluginLog _log;
     private readonly Config _config;
     private readonly BossNames _names;
-    private readonly ActionWatcher _actions;
+    private readonly ActionWatcher? _actions;
     private readonly PenumbraRedraw _penumbra;
 
     private readonly Dictionary<ulong, Scaled> _scaled = [];
-    private readonly List<(IBattleNpc Npc, string Boss)> _found = [];
+    private readonly List<(IBattleNpc Npc, string Boss, float Size)> _found = [];
     private readonly List<BossOnField> _onField = [];
     private DateTime? _outOfCombatSince;
     private SizeMethod _activeMethod;
@@ -42,13 +44,20 @@ public sealed unsafe class BossScaler : IDisposable
 
     public IReadOnlyList<BossOnField> OnField => _onField;
 
-    public BossScaler(IFramework framework, IClientState clientState, IObjectTable objectTable, ICondition condition, IPluginLog log,
-        Config config, BossNames names, ActionWatcher actions, PenumbraRedraw penumbra)
+    /// <summary>False when enemy actions can't be read; phases then follow casts and bosses showing up only.</summary>
+    public bool ReadsActions => _actions != null;
+
+    /// <summary>When set, your current target (an enemy) gets this size. For trying the size method anywhere.</summary>
+    public float? TargetTestSize { get; set; }
+
+    public BossScaler(IFramework framework, IClientState clientState, IObjectTable objectTable, ICondition condition, ITargetManager targetManager,
+        IPluginLog log, Config config, BossNames names, ActionWatcher? actions, PenumbraRedraw penumbra)
     {
         _framework = framework;
         _clientState = clientState;
         _objectTable = objectTable;
         _condition = condition;
+        _targetManager = targetManager;
         _log = log;
         _config = config;
         _names = names;
@@ -57,7 +66,8 @@ public sealed unsafe class BossScaler : IDisposable
         _activeMethod = config.Method;
 
         Tracker.PhaseChanged += phase => _log.Debug("{fight} {phase}", Tracker.Fight?.Key ?? "", phase.Title);
-        _actions.ActionUsed += OnAction;
+        if (_actions != null)
+            _actions.ActionUsed += OnAction;
         _clientState.TerritoryChanged += OnTerritoryChanged;
         _framework.Update += OnUpdate;
 
@@ -68,9 +78,26 @@ public sealed unsafe class BossScaler : IDisposable
     {
         _framework.Update -= OnUpdate;
         _clientState.TerritoryChanged -= OnTerritoryChanged;
-        _actions.ActionUsed -= OnAction;
-        _actions.Enabled = false;
-        RestoreAll();
+        if (_actions != null)
+        {
+            _actions.ActionUsed -= OnAction;
+            _actions.Enabled = false;
+        }
+
+        // the object list may only be read on the game's thread; don't hang the unload if it's busy
+        try
+        {
+            if (_framework.IsInFrameworkUpdateThread)
+                RestoreWhere(_ => true);
+            else
+                _framework.RunOnFrameworkThread(() => RestoreWhere(_ => true)).Wait(TimeSpan.FromSeconds(2));
+        }
+        catch (Exception ex)
+        {
+            _log.Warning(ex, "Could not put the bosses back while unloading");
+        }
+
+        _scaled.Clear();
     }
 
     private void OnTerritoryChanged(uint territory)
@@ -81,37 +108,58 @@ public sealed unsafe class BossScaler : IDisposable
         _outOfCombatSince = null;
 
         Tracker.Enter(Ultimates.ForTerritory(territory));
-        _actions.Enabled = Tracker.Fight != null;
+        if (_actions != null)
+            _actions.Enabled = Tracker.Fight != null;
     }
 
     private void OnAction(uint actionId) => Tracker.OnAction(actionId);
 
     private void OnUpdate(IFramework framework)
     {
+        try
+        {
+            Update();
+        }
+        catch (Exception ex)
+        {
+            _log.Error(ex, "Error while resizing bosses");
+        }
+    }
+
+    private void Update()
+    {
         var fight = Tracker.Fight;
-        if (fight == null)
+        if (fight == null && TargetTestSize == null && _scaled.Count == 0)
             return;
 
         if (_activeMethod != _config.Method)
         {
-            RestoreAll();
+            RestoreWhere(_ => true);
+            _scaled.Clear();
             _activeMethod = _config.Method;
         }
 
-        TrackWipes();
-        FindBosses(fight);
+        _found.Clear();
+        if (fight != null)
+        {
+            TrackWipes();
+            FindBosses(fight);
+        }
 
-        var phase = Tracker.Current;
+        AddTestTarget();
+
         var now = DateTime.UtcNow;
         var present = new HashSet<ulong>();
         _onField.Clear();
 
-        foreach (var (npc, boss) in _found)
+        foreach (var (npc, boss, size) in _found)
         {
-            var size = _config.Enabled ? SizeTable.ForBoss(_config.Sizes, fight, phase, boss) : SizeTable.Normal;
             var key = Key(npc);
-            present.Add(key);
-            _onField.Add(new BossOnField(boss, size));
+            if (!present.Add(key))
+                continue;
+
+            if (boss != TargetLabel)
+                _onField.Add(new BossOnField(boss, size));
 
             try
             {
@@ -123,9 +171,13 @@ public sealed unsafe class BossScaler : IDisposable
             }
         }
 
-        // bosses that left the field took their size with them
-        foreach (var key in _scaled.Keys.Where(k => !present.Contains(k)).ToList())
-            _scaled.Remove(key);
+        // still on the field but no longer to be resized (e.g. the test target changed): put back
+        if (_scaled.Keys.Any(k => !present.Contains(k)))
+        {
+            RestoreWhere(k => !present.Contains(k));
+            foreach (var key in _scaled.Keys.Where(k => !present.Contains(k)).ToList())
+                _scaled.Remove(key);
+        }
     }
 
     private void TrackWipes()
@@ -145,14 +197,15 @@ public sealed unsafe class BossScaler : IDisposable
 
     private void FindBosses(Ultimate fight)
     {
-        _found.Clear();
+        var bosses = new List<(IBattleNpc Npc, string Boss)>();
 
         foreach (var obj in _objectTable)
         {
             if (obj.ObjectKind != ObjectKind.BattleNpc || obj.Address == nint.Zero || obj is not IBattleNpc npc)
                 continue;
 
-            if (!_names.TryGet(npc.NameId, out var boss))
+            // names shared with other content only count when this fight has them
+            if (!_names.TryGet(npc.NameId, out var boss) || !fight.Bosses.Contains(boss, StringComparer.OrdinalIgnoreCase))
                 continue;
 
             if (npc.IsTargetable && !npc.IsDead)
@@ -161,11 +214,25 @@ public sealed unsafe class BossScaler : IDisposable
             if (npc.IsCasting)
                 Tracker.OnAction(npc.CastActionId);
 
-            _found.Add((npc, boss));
+            bosses.Add((npc, boss));
         }
 
-        // names shared with other content are only bosses here when the fight has them
-        _found.RemoveAll(f => !fight.Bosses.Contains(f.Boss, StringComparer.OrdinalIgnoreCase));
+        // sizes after the phase is updated, so a boss that starts a phase gets that phase's size right away
+        var phase = Tracker.Current;
+        foreach (var (npc, boss) in bosses)
+        {
+            var size = _config.Enabled ? SizeTable.ForBoss(_config.Sizes, fight, phase, boss) : SizeTable.Normal;
+            _found.Add((npc, boss, size));
+        }
+    }
+
+    private void AddTestTarget()
+    {
+        if (TargetTestSize is not { } size)
+            return;
+
+        if (_targetManager.Target is IBattleNpc npc && npc.Address != nint.Zero && npc.ObjectKind == ObjectKind.BattleNpc)
+            _found.Insert(0, (npc, TargetLabel, SizeTable.Clamp(size)));
     }
 
     private static ulong Key(IGameObject obj)
@@ -203,6 +270,11 @@ public sealed unsafe class BossScaler : IDisposable
         }
 
         var current = (Vector3)draw->Object.Scale;
+        if (!IsUsable(current))
+        {
+            scaled.Done = true;
+            return;
+        }
 
         // a new model, or the game resized it (some bosses grow): start again from its size now
         if (scaled.Draw != draw || !Near(current, scaled.Written))
@@ -257,42 +329,54 @@ public sealed unsafe class BossScaler : IDisposable
         scaled.Done = scaled.Redraws.Count == 0;
     }
 
-    /// <summary>Puts back every boss that is still on the field.</summary>
-    private void RestoreAll()
+    /// <summary>Puts back the resized objects that are still on the field and match the filter.</summary>
+    private void RestoreWhere(Func<ulong, bool> filter)
     {
         if (_scaled.Count == 0)
             return;
 
-        try
+        foreach (var obj in _objectTable)
         {
-            foreach (var obj in _objectTable)
-            {
-                if (obj.Address == nint.Zero || obj is not IBattleNpc npc || !_scaled.TryGetValue(Key(npc), out var scaled) || scaled.Address != npc.Address)
-                    continue;
+            if (obj.Address == nint.Zero || obj is not IBattleNpc npc)
+                continue;
 
-                if (_activeMethod == SizeMethod.Instant)
-                {
-                    var draw = ((GameObject*)npc.Address)->DrawObject;
-                    if (draw != null && draw == scaled.Draw && Near(draw->Object.Scale, scaled.Written))
-                        draw->Object.Scale = scaled.Baseline;
-                }
-                else if (scaled.HasOriginal)
-                {
-                    ((GameObject*)npc.Address)->Scale = scaled.OriginalObjectScale;
-                    ((GameCharacter*)npc.Address)->CharacterData.ModelScale = scaled.OriginalModelScale;
-                    _penumbra.Redraw(npc.ObjectIndex);
-                }
+            var key = Key(npc);
+            if (!filter(key) || !_scaled.TryGetValue(key, out var scaled) || scaled.Address != npc.Address)
+                continue;
+
+            try
+            {
+                Restore(npc, scaled);
+            }
+            catch (Exception ex)
+            {
+                _log.Error(ex, "Could not put a boss back to its normal size");
             }
         }
-        catch (Exception ex)
-        {
-            _log.Error(ex, "Could not put the bosses back to their normal size");
-        }
+    }
 
-        _scaled.Clear();
+    private void Restore(IBattleNpc npc, Scaled scaled)
+    {
+        if (_activeMethod == SizeMethod.Instant)
+        {
+            var draw = ((GameObject*)npc.Address)->DrawObject;
+
+            // only undo our own change; if the model was replaced, the new one is already normal
+            if (draw != null && draw == scaled.Draw && Near(draw->Object.Scale, scaled.Written))
+                draw->Object.Scale = scaled.Baseline;
+        }
+        else if (scaled.HasOriginal)
+        {
+            ((GameObject*)npc.Address)->Scale = scaled.OriginalObjectScale;
+            ((GameCharacter*)npc.Address)->CharacterData.ModelScale = scaled.OriginalModelScale;
+            _penumbra.Redraw(npc.ObjectIndex);
+        }
     }
 
     private static bool Near(Vector3 a, Vector3 b) => Vector3.DistanceSquared(a, b) < 1e-8f;
+
+    private static bool IsUsable(Vector3 scale)
+        => float.IsFinite(scale.X) && float.IsFinite(scale.Y) && float.IsFinite(scale.Z) && scale.X > 0.0001f && scale.Y > 0.0001f && scale.Z > 0.0001f;
 
     private static float Normalize(float scale) => float.IsFinite(scale) && scale > 0.0001f ? scale : 1f;
 

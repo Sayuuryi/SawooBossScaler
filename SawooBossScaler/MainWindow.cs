@@ -19,6 +19,7 @@ public sealed class MainWindow : Window
     private readonly PenumbraRedraw _penumbra;
     private Tab? _requestedTab;
     private float _allSize = 0.5f;
+    private float _testSize = 0.5f;
 
     public MainWindow(IDalamudPluginInterface pluginInterface, Config config, BossScaler scaler, PenumbraRedraw penumbra)
         : base("Sawoo Boss Scaler##SawooBossScalerMain")
@@ -47,6 +48,12 @@ public sealed class MainWindow : Window
     }
 
     private void Save() => _pluginInterface.SavePluginConfig(_config);
+
+    public override void OnClose()
+    {
+        _scaler.TargetTestSize = null;
+        base.OnClose();
+    }
 
     public override void Draw()
     {
@@ -310,6 +317,23 @@ public sealed class MainWindow : Window
         if (!_penumbra.Available)
             ImGui.TextColored(Changed, "Penumbra isn't running.");
         ImGui.Unindent();
+
+        ImGui.Spacing();
+        ImGui.Spacing();
+        ImGui.TextColored(Accent, "Try it");
+        ImGui.TextColored(Dim, "Resizes the enemy you have targeted, anywhere (a striking dummy works). Turns off when you close the window.");
+
+        var testing = _scaler.TargetTestSize != null;
+        if (ImGui.Checkbox("Resize my target", ref testing))
+            _scaler.TargetTestSize = testing ? _testSize : null;
+
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(200 * Scale);
+        if (SizeSlider("##TestSize", ref _testSize) && testing)
+            _scaler.TargetTestSize = _testSize;
+
+        if (!_scaler.ReadsActions)
+            ImGui.TextColored(Changed, "Enemy actions can't be read on this game version. Phases follow casts and bosses showing up only.");
 
         ImGui.Spacing();
         ImGui.Spacing();

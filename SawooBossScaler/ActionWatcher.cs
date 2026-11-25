@@ -39,8 +39,12 @@ public sealed unsafe class ActionWatcher : IDisposable
 
         try
         {
-            if (header != null && caster != null && caster->GameObject.ObjectKind == ObjectKind.BattleNpc)
-                ActionUsed?.Invoke(header->ActionId);
+            if (header == null || caster == null || caster->GameObject.ObjectKind != ObjectKind.BattleNpc)
+                return;
+
+            ActionUsed?.Invoke(header->ActionId);
+            if (header->SpellId != 0 && header->SpellId != header->ActionId)
+                ActionUsed?.Invoke(header->SpellId);
         }
         catch (Exception ex)
         {
@@ -49,4 +53,24 @@ public sealed unsafe class ActionWatcher : IDisposable
     }
 
     public void Dispose() => _hook.Dispose();
+
+    /// <summary>Null when the game function can't be found (e.g. right after a game patch); the plugin works without it.</summary>
+    public static ActionWatcher? TryCreate(IGameInteropProvider interop, IPluginLog log)
+    {
+        try
+        {
+            if (ActionEffectHandler.Addresses.Receive.Value == 0)
+            {
+                log.Warning("Enemy actions can't be read on this game version");
+                return null;
+            }
+
+            return new ActionWatcher(interop, log);
+        }
+        catch (Exception ex)
+        {
+            log.Warning(ex, "Enemy actions can't be read on this game version");
+            return null;
+        }
+    }
 }
